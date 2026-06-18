@@ -380,6 +380,84 @@ state from the wrong buffer after feeding output to the native module."
       (kill-buffer ghostel-buf)
       (kill-buffer other-buf))))
 
+(ert-deftest ghostel-test-filter-runs-due-redraw-after-drain ()
+  "Bulk output draining must not starve redraw timers that are already due."
+  (let ((buf (generate-new-buffer " *ghostel-test-filter-due-redraw*"))
+        redraw-called
+        drain-called)
+    (unwind-protect
+        (with-current-buffer buf
+          (setq-local ghostel--term 'fake-handle
+                      ghostel--redraw-timer 'fake-timer
+                      ghostel--redraw-due-time
+                      (time-subtract (current-time) (seconds-to-time 1)))
+          (cl-letf (((symbol-function 'process-buffer) (lambda (_) buf))
+                    ((symbol-function 'ghostel--write-input) #'ignore)
+                    ((symbol-function 'ghostel--drain-process-output)
+                     (lambda (_) (setq drain-called t)))
+                    ((symbol-function 'ghostel--redraw-now)
+                     (lambda (buffer) (setq redraw-called buffer))))
+            (ghostel--filter 'fake-proc "bulk-output"))
+          (should drain-called)
+          (should (eq redraw-called buf)))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-filter-does-not-redraw-before-due-time ()
+  "Bulk output draining keeps the delayed redraw when it is not due yet."
+  (let ((buf (generate-new-buffer " *ghostel-test-filter-pending-redraw*"))
+        redraw-called)
+    (unwind-protect
+        (with-current-buffer buf
+          (setq-local ghostel--term 'fake-handle
+                      ghostel--redraw-timer 'fake-timer
+                      ghostel--redraw-due-time
+                      (time-add (current-time) (seconds-to-time 60)))
+          (cl-letf (((symbol-function 'process-buffer) (lambda (_) buf))
+                    ((symbol-function 'ghostel--write-input) #'ignore)
+                    ((symbol-function 'ghostel--drain-process-output)
+                     #'ignore)
+                    ((symbol-function 'ghostel--redraw-now)
+                     (lambda (_buffer) (setq redraw-called t))))
+            (ghostel--filter 'fake-proc "bulk-output"))
+          (should-not redraw-called))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-sentinel-flushes-pending-redraw-before-exit ()
+  "Process exit materializes pending terminal output before timer cleanup."
+  (let ((buf (generate-new-buffer " *ghostel-test-sentinel-redraw*"))
+        proc
+        redraw-called)
+    (unwind-protect
+        (progn
+          (setq proc (make-pipe-process :name "ghostel-test-sentinel-redraw"
+                                        :buffer buf
+                                        :noquery t))
+          (with-current-buffer buf
+            (setq ghostel-kill-buffer-on-exit nil
+                  ghostel--term 'fake-handle
+                  ghostel--redraw-timer (run-with-timer 60 nil #'ignore)
+                  ghostel--redraw-due-time
+                  (time-add (current-time) (seconds-to-time 60)))
+            (cl-letf (((symbol-function 'ghostel--redraw-now)
+                       (lambda (buffer)
+                         (setq redraw-called buffer)
+                         (with-current-buffer buffer
+                           (when ghostel--redraw-timer
+                             (cancel-timer ghostel--redraw-timer))
+                           (setq ghostel--redraw-timer nil
+                                 ghostel--redraw-due-time nil)))))
+              (ghostel--sentinel proc "finished\n"))
+            (should (eq redraw-called buf))
+            (should-not ghostel--redraw-timer)
+            (should-not ghostel--redraw-due-time)))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when ghostel--redraw-timer
+            (cancel-timer ghostel--redraw-timer)))
+        (kill-buffer buf)))))
+
 (ert-deftest ghostel-test-ignore-cursor-change ()
   "Test that `ghostel-ignore-cursor-change' suppresses cursor style updates."
   (let ((buf (generate-new-buffer " *ghostel-test-ignore-cursor*")))

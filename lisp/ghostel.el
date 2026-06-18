@@ -1591,6 +1591,9 @@ One of `semi-char', `char', `copy', `emacs', or `line'.  See
 (defvar-local ghostel--redraw-timer nil
   "Timer for delayed redraw.")
 
+(defvar-local ghostel--redraw-due-time nil
+  "Time when the pending delayed redraw should run.")
+
 (defvar-local ghostel--plain-link-detection-timer nil
   "Timer for delayed redraw-triggered plain-text link detection.")
 
@@ -2899,9 +2902,7 @@ Restores the cursor style, deactivates the mark, disables
 
 (defun ghostel--freeze-terminal ()
   "Cancel the redraw timer so new output stops updating the buffer."
-  (when ghostel--redraw-timer
-    (cancel-timer ghostel--redraw-timer)
-    (setq ghostel--redraw-timer nil)))
+  (ghostel--cancel-redraw-timer))
 
 (defvar-local ghostel--fake-cursor-overlay nil
   "Overlay rendering the hint cursor in copy and Emacs modes.
@@ -5403,6 +5404,26 @@ loops while still allowing recursive filters to feed the terminal."
               (setq count (1+ count))))
         (process-put process 'ghostel--filter-draining nil)))))
 
+(defun ghostel--cancel-redraw-timer ()
+  "Cancel any pending delayed redraw."
+  (when ghostel--redraw-timer
+    (cancel-timer ghostel--redraw-timer))
+  (setq ghostel--redraw-timer nil
+        ghostel--redraw-due-time nil))
+
+(defun ghostel--schedule-redraw-timer (delay buffer &optional now)
+  "Schedule BUFFER to redraw after DELAY seconds.
+NOW, when non-nil, is the timestamp used as the due-time base."
+  (let ((base-time (or now (current-time))))
+    (setq ghostel--redraw-due-time (time-add base-time delay))
+    (setq ghostel--redraw-timer
+          (run-with-timer delay nil #'ghostel--redraw-now buffer))))
+
+(defun ghostel--redraw-due-p ()
+  "Return non-nil when a pending delayed redraw is due now."
+  (and ghostel--redraw-due-time
+       (not (time-less-p (current-time) ghostel--redraw-due-time))))
+
 (defun ghostel--filter (process output)
   "Process filter: feed PTY output to the terminal.
 PROCESS is the shell process, OUTPUT is the raw byte string.
@@ -5431,7 +5452,9 @@ the redraw is performed immediately to minimize typing latency."
             (ghostel--redraw-now (current-buffer))
           ;; Bulk output: schedule a later redraw.
           (ghostel--invalidate))
-        (ghostel--drain-process-output process)))))
+        (ghostel--drain-process-output process)
+        (when (ghostel--redraw-due-p)
+          (ghostel--redraw-now (current-buffer)))))))
 
 (defun ghostel--sentinel (process event)
   "Process sentinel: clean up when shell exits.
@@ -5440,8 +5463,8 @@ PROCESS is the shell process, EVENT describes the state change."
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when ghostel--redraw-timer
-          (cancel-timer ghostel--redraw-timer)
-          (setq ghostel--redraw-timer nil))
+          (ghostel--redraw-now buf))
+        (ghostel--cancel-redraw-timer)
         (when ghostel--input-timer
           (cancel-timer ghostel--input-timer)
           (setq ghostel--input-timer nil))
@@ -6092,21 +6115,19 @@ terminal windows."
 With `ghostel-adaptive-fps', use a shorter delay for the first
 frame after idle to improve interactive responsiveness."
   (unless ghostel--redraw-timer
-    (let ((delay (if (and ghostel-adaptive-fps ghostel--last-output-time)
-                     (let ((idle-secs (float-time
-                                       (time-subtract (current-time)
-                                                      ghostel--last-output-time))))
+    (let* ((now (current-time))
+           (delay (if (and ghostel-adaptive-fps ghostel--last-output-time)
+                      (let ((idle-secs (float-time
+                                        (time-subtract now
+                                                       ghostel--last-output-time))))
                        ;; If idle for more than 100ms, use a short delay
                        ;; for snappy first-frame response.
                        (if (> idle-secs 0.1)
                            (min 0.016 ghostel-timer-delay)
                          ghostel-timer-delay))
-                   ghostel-timer-delay)))
-      (setq ghostel--last-output-time (current-time))
-      (setq ghostel--redraw-timer
-            (run-with-timer delay nil
-                            #'ghostel--redraw-now
-                            (current-buffer))))))
+                    ghostel-timer-delay)))
+      (setq ghostel--last-output-time now)
+      (ghostel--schedule-redraw-timer delay (current-buffer) now))))
 
 (defun ghostel--query-font-cached (font)
   "Return `query-font' metrics for FONT, caching during native redraw.
@@ -6222,9 +6243,7 @@ for BUFFER; return nil to let the redraw proceed."
   (when (with-demoted-errors "ghostel-inhibit-redraw-functions error: %S"
           (run-hook-with-args-until-success
            'ghostel-inhibit-redraw-functions buffer))
-    (setq ghostel--redraw-timer
-          (run-with-timer ghostel-timer-delay nil
-                          #'ghostel--redraw-now buffer))
+    (ghostel--schedule-redraw-timer ghostel-timer-delay buffer)
     t))
 
 (defun ghostel--redraw-now (buffer)
@@ -6236,8 +6255,7 @@ live viewport."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when ghostel--redraw-timer
-        (cancel-timer ghostel--redraw-timer)
-        (setq ghostel--redraw-timer nil))
+        (ghostel--cancel-redraw-timer))
       (when (and ghostel--term
                  (ghostel--terminal-live-p)
                  (not (ghostel--maybe-defer-redraw buffer)))
@@ -6549,7 +6567,7 @@ spawn after initialization."
     (unless (derived-mode-p 'ghostel-mode)
       (ghostel-mode))
     (when ghostel--redraw-timer
-      (cancel-timer ghostel--redraw-timer))
+      (ghostel--cancel-redraw-timer))
     (when ghostel--plain-link-detection-timer
       (cancel-timer ghostel--plain-link-detection-timer))
     (let ((inhibit-read-only t))
@@ -6559,6 +6577,7 @@ spawn after initialization."
           ghostel--term-cols nil
           ghostel--process nil
           ghostel--redraw-timer nil
+          ghostel--redraw-due-time nil
           ghostel--plain-link-detection-timer nil
           ghostel--plain-link-detection-begin nil
           ghostel--plain-link-detection-end nil

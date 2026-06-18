@@ -296,8 +296,7 @@ into our buffer."
     (delete-process ghostel--process)
     (setq ghostel--process nil))
   (when (bound-and-true-p ghostel--redraw-timer)
-    (cancel-timer ghostel--redraw-timer)
-    (setq ghostel--redraw-timer nil))
+    (ghostel--cancel-redraw-timer))
   (when (bound-and-true-p ghostel--input-timer)
     (cancel-timer ghostel--input-timer)
     (setq ghostel--input-timer nil)))
@@ -331,8 +330,7 @@ cursor one row and would stack the lines diagonally."
     (let ((crlf (replace-regexp-in-string "\n" "\r\n" header t t)))
       (ghostel--write-input ghostel--term crlf))
     (when ghostel--redraw-timer
-      (cancel-timer ghostel--redraw-timer)
-      (setq ghostel--redraw-timer nil))
+      (ghostel--cancel-redraw-timer))
     (ghostel--redraw-now (current-buffer))))
 
 (defun ghostel-compile--finalize (buffer exit end-time)
@@ -461,8 +459,7 @@ same as in any compilation buffer."
           ;; `--teardown-terminal' destroys the renderer.
           (when ghostel--term
             (when ghostel--redraw-timer
-              (cancel-timer ghostel--redraw-timer)
-              (setq ghostel--redraw-timer nil))
+              (ghostel--cancel-redraw-timer))
             (ghostel--redraw-now buffer))
           (setq compilation-in-progress
                 (delq process compilation-in-progress))
@@ -601,8 +598,7 @@ resize hooks
                      (buffer-name existing))))
           (setq ghostel--process nil))
         (when (bound-and-true-p ghostel--redraw-timer)
-          (cancel-timer ghostel--redraw-timer)
-          (setq ghostel--redraw-timer nil))
+          (ghostel--cancel-redraw-timer))
         (when (bound-and-true-p ghostel--input-timer)
           (cancel-timer ghostel--input-timer)
           (setq ghostel--input-timer nil)))))
